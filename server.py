@@ -1,16 +1,30 @@
-from flask import Flask, render_template_string, request, send_from_directory, redirect, url_for, session
+from flask import Flask, render_template_string, request, redirect, url_for, session, Response
 from werkzeug.security import generate_password_hash, check_password_hash
 import os
 import json
+import io
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
 app = Flask(__name__)
-app.secret_key = 'chave_secreta_super_segura' # Necessária para gerir sessões de login
+app.secret_key = 'chave_secreta_super_segura'
 
-UPLOAD_FOLDER = os.path.dirname(os.path.abspath(__file__))
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-USERS_FILE = os.path.join(UPLOAD_FOLDER, 'users.json')
+# ==================== CONFIGURAÇÕES DO GOOGLE DRIVE ====================
+FOLDER_ID = 'O_TEU_ID_DA_PASTA_DO_DRIVE'  # Substitui pelo ID que copiaste do URL do Google Drive
+CREDENTIALS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'credentials.json')
 
-# Funções auxiliares para gerir utilizadores
+SCOPES = ['https://www.googleapis.com/auth/drive']
+
+def get_drive_service():
+    creds = service_account.Credentials.from_service_account_file(
+        CREDENTIALS_FILE, scopes=SCOPES)
+    return build('drive', 'v3', credentials=creds)
+
+# ==================== GESTÃO DE UTILIZADORES ====================
+# Os utilizadores ficam num ficheiro temporário local
+USERS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'users.json')
+
 def load_users():
     if os.path.exists(USERS_FILE):
         with open(USERS_FILE, 'r') as f:
@@ -21,7 +35,7 @@ def save_users(users):
     with open(USERS_FILE, 'w') as f:
         json.dump(users, f)
 
-# HTML para Login e Registo
+# ==================== TEMPLATES HTML ====================
 AUTH_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="pt">
@@ -49,9 +63,7 @@ AUTH_TEMPLATE = """
 <body>
     <div class="auth-card">
         <h2>{{ title }}</h2>
-        {% if error %}
-        <p class="error">{{ error }}</p>
-        {% endif %}
+        {% if error %}<p class="error">{{ error }}</p>{% endif %}
         <form method="POST">
             <div class="form-group">
                 <label>Utilizador</label>
@@ -63,22 +75,19 @@ AUTH_TEMPLATE = """
             </div>
             <button type="submit" style="margin-top: 20px; width: 100%;">{{ btn_text }}</button>
         </form>
-        <div class="switch-link">
-            {{ switch_text | safe }}
-        </div>
+        <div class="switch-link">{{ switch_text | safe }}</div>
     </div>
 </body>
 </html>
 """
 
-# HTML do Gestor de Ficheiros (Com botão de Logout)
 DASHBOARD_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="pt">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Gestor de Ficheiros Local</title>
+    <title>Gestor de Ficheiros Google Drive</title>
     <script src="https://unpkg.com/lucide@latest"></script>
     <style>
         :root { --bg-color: #0f172a; --card-bg: #1e293b; --accent: #3b82f6; --accent-hover: #2563eb; --text-main: #f8fafc; --text-muted: #94a3b8; --border-color: #334155; --danger: #ef4444; }
@@ -113,8 +122,8 @@ DASHBOARD_TEMPLATE = """
     <aside>
         <div class="top-side">
             <div class="logo">
-                <i data-lucide="hard-drive"></i>
-                <span>LocalServer</span>
+                <i data-lucide="cloud"></i>
+                <span>DriveServer</span>
             </div>
             <ul class="nav-menu">
                 <li class="nav-item active" onclick="filterCategory('all')">
@@ -133,7 +142,7 @@ DASHBOARD_TEMPLATE = """
         </div>
         <a href="/logout" class="logout-btn">
             <i data-lucide="log-out"></i>
-            <span>Terminar Sessão ({{ user }})</span>
+            <span>Sair ({{ user }})</span>
         </a>
     </aside>
 
@@ -141,7 +150,7 @@ DASHBOARD_TEMPLATE = """
         <header>
             <div class="search-bar">
                 <i data-lucide="search" style="color: var(--text-muted);"></i>
-                <input type="text" id="searchInput" onkeyup="filterFiles()" placeholder="Pesquisar ficheiros...">
+                <input type="text" id="searchInput" onkeyup="filterFiles()" placeholder="Pesquisar no Drive...">
             </div>
             <form action="/upload" method="post" enctype="multipart/form-data" id="uploadForm">
                 <div class="upload-wrapper">
@@ -154,11 +163,11 @@ DASHBOARD_TEMPLATE = """
             </form>
         </header>
 
-        <h2 class="section-title">Ficheiros Disponíveis</h2>
+        <h2 class="section-title">Ficheiros Guardados no Google Drive</h2>
 
         <div class="files-grid" id="filesGrid">
             {% for file in files %}
-            <a href="/files/{{ file.name }}" target="_blank" class="file-card" data-name="{{ file.name.lower() }}" data-type="{{ file.type }}">
+            <a href="/files/{{ file.id }}/{{ file.name }}" target="_blank" class="file-card" data-name="{{ file.name.lower() }}" data-type="{{ file.type }}">
                 <div class="file-icon">
                     <i data-lucide="{{ file.icon }}"></i>
                 </div>
@@ -196,19 +205,21 @@ DASHBOARD_TEMPLATE = """
 </html>
 """
 
-def get_file_info(filename):
+# ==================== FUNÇÕES AUXILIARES DRIVE ====================
+def get_file_info(file_obj):
+    filename = file_obj.get('name', 'Sem nome')
     ext = filename.split('.')[-1].lower() if '.' in filename else ''
     icon = 'file'
     if ext in ['png', 'jpg', 'jpeg', 'gif']: icon = 'image'
     elif ext in ['txt', 'pdf', 'doc', 'docx']: icon = 'file-text'
     elif ext in ['py', 'html', 'js', 'css']: icon = 'code'
     
-    filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-    size_bytes = os.path.getsize(filepath) if os.path.exists(filepath) else 0
+    size_bytes = int(file_obj.get('size', 0))
     size_kb = f"{round(size_bytes / 1024, 1)} KB" if size_bytes > 0 else "0 KB"
     
-    return {'name': filename, 'icon': icon, 'type': ext, 'size': size_kb}
+    return {'id': file_obj.get('id'), 'name': filename, 'icon': icon, 'type': ext, 'size': size_kb}
 
+# ==================== ROTAS DA APLICAÇÃO ====================
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     error = None
@@ -216,12 +227,10 @@ def login():
         username = request.form['username']
         password = request.form['password']
         users = load_users()
-        
         if username in users and check_password_hash(users[username], password):
             session['user'] = username
             return redirect(url_for('index'))
         error = 'Utilizador ou palavra-passe incorretos.'
-        
     return render_template_string(AUTH_TEMPLATE, title='Iniciar Sessão', btn_text='Entrar', switch_text='Não tens conta? <a href="/register">Regista-te</a>', error=error)
 
 @app.route('/register', methods=['GET', 'POST'])
@@ -231,7 +240,6 @@ def register():
         username = request.form['username']
         password = request.form['password']
         users = load_users()
-        
         if username in users:
             error = 'Esse nome de utilizador já existe.'
         else:
@@ -239,7 +247,6 @@ def register():
             save_users(users)
             session['user'] = username
             return redirect(url_for('index'))
-            
     return render_template_string(AUTH_TEMPLATE, title='Criar Conta', btn_text='Registar', switch_text='Já tens conta? <a href="/login">Entra aqui</a>', error=error)
 
 @app.route('/logout')
@@ -251,27 +258,63 @@ def logout():
 def index():
     if 'user' not in session:
         return redirect(url_for('login'))
-        
-    ignored = ['server.py', 'index.html', 'users.json', '__pycache__']
-    all_files = [f for f in os.listdir(UPLOAD_FOLDER) if os.path.isfile(os.path.join(UPLOAD_FOLDER, f)) and f not in ignored]
-    files_data = [get_file_info(f) for f in all_files]
+    
+    try:
+        service = get_drive_service()
+        # Procura os ficheiros dentro da pasta específica do Drive
+        query = f"'{FOLDER_ID}' in parents and trashed = false"
+        results = service.files().list(q=query, fields="files(id, name, mimeType, size)").execute()
+        drive_files = results.get('files', [])
+        files_data = [get_file_info(f) for f in drive_files]
+    except Exception as e:
+        files_data = []
+        print(f"Erro ao carregar do Drive: {e}")
+
     return render_template_string(DASHBOARD_TEMPLATE, files=files_data, user=session['user'])
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
     if 'user' not in session:
         return redirect(url_for('login'))
+    
     if 'file' in request.files:
         file = request.files['file']
         if file.filename != '':
-            file.save(os.path.join(app.config['UPLOAD_FOLDER'], file.filename))
+            # Guarda temporariamente no servidor local antes do envio para o Drive
+            temp_path = os.path.join('/tmp', file.filename) if os.path.exists('/tmp') else file.filename
+            file.save(temp_path)
+            
+            try:
+                service = get_drive_service()
+                file_metadata = {'name': file.filename, 'parents': [FOLDER_ID]}
+                media = MediaFileUpload(temp_path, resumable=True)
+                service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+            except Exception as e:
+                print(f"Erro no Upload para o Drive: {e}")
+            finally:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path) # Apaga o ficheiro temporário local
+
     return redirect(url_for('index'))
 
-@app.route('/files/<filename>')
-def download_file(filename):
+@app.route('/files/<file_id>/<filename>')
+def download_file(file_id, filename):
     if 'user' not in session:
         return redirect(url_for('login'))
-    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+    
+    try:
+        service = get_drive_service()
+        request_drive = service.files().get_media(fileId=file_id)
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request_drive)
+        done = False
+        while done is False:
+            status, done = downloader.next_chunk()
+        
+        fh.seek(0)
+        return Response(fh.read(), headers={"Content-Disposition": f"inline; filename={filename}"})
+    except Exception as e:
+        return f"Erro ao descarregar ficheiro: {e}", 400
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8000, debug=True)
