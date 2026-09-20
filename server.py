@@ -11,7 +11,7 @@ app = Flask(__name__)
 app.secret_key = 'chave_secreta_super_segura'
 
 # ==================== CONFIGURAÇÕES DO GOOGLE DRIVE (EM BASTIDORES) ====================
-FOLDER_ID = '1ky5jM-il2RmOpsDwojbGMDZe_d7XDfrF'  # Substitui pelo ID que copiaste do URL do Google Drive
+FOLDER_ID = '1ky5jM-il2RmOpsDwojbGMDZe_d7XDfrF'
 CREDENTIALS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'credentials.json')
 
 SCOPES = ['https://www.googleapis.com/auth/drive']
