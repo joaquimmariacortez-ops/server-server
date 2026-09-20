@@ -1,25 +1,17 @@
-from flask import Flask, render_template_string, request, redirect, url_for, session, Response
+from flask import Flask, render_template_string, request, redirect, url_for, session, send_from_directory
 from werkzeug.security import generate_password_hash, check_password_hash
 import os
 import json
-import io
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
 app = Flask(__name__)
 app.secret_key = 'chave_secreta_super_segura'
 
-# ==================== CONFIGURAÇÕES DO GOOGLE DRIVE ====================
-FOLDER_ID = '1ky5jM-il2RmOpsDwojbGMDZe_d7XDfrF'
-CREDENTIALS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'credentials.json')
+# ==================== CONFIGURAÇÃO DE ARMAZENAMENTO LOCAL ====================
+UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads')
+if not os.path.exists(UPLOAD_FOLDER):
+    os.makedirs(UPLOAD_FOLDER)
 
-SCOPES = ['https://www.googleapis.com/auth/drive']
-
-def get_drive_service():
-    creds = service_account.Credentials.from_service_account_file(
-        CREDENTIALS_FILE, scopes=SCOPES)
-    return build('drive', 'v3', credentials=creds)
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
 # ==================== GESTÃO DE UTILIZADORES ====================
 USERS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'users.json')
@@ -166,7 +158,7 @@ DASHBOARD_TEMPLATE = """
 
         <div class="files-grid" id="filesGrid">
             {% for file in files %}
-            <a href="/files/{{ file.id }}/{{ file.name }}" target="_blank" class="file-card" data-name="{{ file.name.lower() }}" data-type="{{ file.type }}">
+            <a href="/files/{{ file.name }}" target="_blank" class="file-card" data-name="{{ file.name.lower() }}" data-type="{{ file.type }}">
                 <div class="file-icon">
                     <i data-lucide="{{ file.icon }}"></i>
                 </div>
@@ -205,18 +197,18 @@ DASHBOARD_TEMPLATE = """
 """
 
 # ==================== FUNÇÕES AUXILIARES ====================
-def get_file_info(file_obj):
-    filename = file_obj.get('name', 'Sem nome')
+def get_file_info(filename):
+    file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
     ext = filename.split('.')[-1].lower() if '.' in filename else ''
     icon = 'file'
     if ext in ['png', 'jpg', 'jpeg', 'gif']: icon = 'image'
     elif ext in ['txt', 'pdf', 'doc', 'docx']: icon = 'file-text'
     elif ext in ['py', 'html', 'js', 'css']: icon = 'code'
     
-    size_bytes = int(file_obj.get('size', 0))
+    size_bytes = os.path.getsize(file_path) if os.path.exists(file_path) else 0
     size_kb = f"{round(size_bytes / 1024, 1)} KB" if size_bytes > 0 else "0 KB"
     
-    return {'id': file_obj.get('id'), 'name': filename, 'icon': icon, 'type': ext, 'size': size_kb}
+    return {'name': filename, 'icon': icon, 'type': ext, 'size': size_kb}
 
 # ==================== ROTAS DA APLICAÇÃO ====================
 @app.route('/login', methods=['GET', 'POST'])
@@ -259,19 +251,9 @@ def index():
         return redirect(url_for('login'))
     
     files_data = []
-    try:
-        service = get_drive_service()
-        query = f"'{FOLDER_ID}' in parents and trashed = false"
-        results = service.files().list(
-            q=query, 
-            fields="files(id, name, mimeType, size)",
-            supportsAllDrives=True,
-            includeItemsFromAllDrives=True
-        ).execute()
-        drive_files = results.get('files', [])
-        files_data = [get_file_info(f) for f in drive_files]
-    except Exception as e:
-        print(f"Erro ao carregar ficheiros: {e}")
+    if os.path.exists(app.config['UPLOAD_FOLDER']):
+        filenames = os.listdir(app.config['UPLOAD_FOLDER'])
+        files_data = [get_file_info(f) for f in filenames if os.path.isfile(os.path.join(app.config['UPLOAD_FOLDER'], f))]
 
     return render_template_string(DASHBOARD_TEMPLATE, files=files_data, user=session['user'])
 
@@ -283,49 +265,16 @@ def upload_file():
     if 'file' in request.files:
         file = request.files['file']
         if file.filename != '':
-            temp_path = os.path.join('/tmp', file.filename) if os.path.exists('/tmp') else file.filename
-            file.save(temp_path)
-            
-            try:
-                service = get_drive_service()
-                file_metadata = {
-                    'name': file.filename, 
-                    'parents': [FOLDER_ID]
-                }
-                media = MediaFileUpload(temp_path, resumable=True)
-                service.files().create(
-                    body=file_metadata, 
-                    media_body=media, 
-                    fields='id',
-                    supportsAllDrives=True
-                ).execute()
-                print(f"Ficheiro {file.filename} enviado com sucesso!")
-            except Exception as e:
-                print(f"Erro no Upload: {e}")
-            finally:
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
+            save_path = os.path.join(app.config['UPLOAD_FOLDER'], file.filename)
+            file.save(save_path)
 
     return redirect(url_for('index'))
 
-@app.route('/files/<file_id>/<filename>')
-def download_file(file_id, filename):
+@app.route('/files/<filename>')
+def download_file(filename):
     if 'user' not in session:
         return redirect(url_for('login'))
-    
-    try:
-        service = get_drive_service()
-        request_drive = service.files().get_media(fileId=file_id, supportsAllDrives=True)
-        fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, request_drive)
-        done = False
-        while done is False:
-            status, done = downloader.next_chunk()
-        
-        fh.seek(0)
-        return Response(fh.read(), headers={"Content-Disposition": f"inline; filename={filename}"})
-    except Exception as e:
-        return f"Erro ao descarregar ficheiro: {e}", 400
+    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8000, debug=True)
