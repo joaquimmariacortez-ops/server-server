@@ -10,7 +10,7 @@ from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 app = Flask(__name__)
 app.secret_key = 'chave_secreta_super_segura'
 
-# ==================== CONFIGURAÇÕES DO GOOGLE DRIVE (EM BASTIDORES) ====================
+# ==================== CONFIGURAÇÕES DO GOOGLE DRIVE ====================
 FOLDER_ID = '1ky5jM-il2RmOpsDwojbGMDZe_d7XDfrF'
 CREDENTIALS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'credentials.json')
 
@@ -258,14 +258,19 @@ def index():
     if 'user' not in session:
         return redirect(url_for('login'))
     
+    files_data = []
     try:
         service = get_drive_service()
         query = f"'{FOLDER_ID}' in parents and trashed = false"
-        results = service.files().list(q=query, fields="files(id, name, mimeType, size)").execute()
+        results = service.files().list(
+            q=query, 
+            fields="files(id, name, mimeType, size)",
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True
+        ).execute()
         drive_files = results.get('files', [])
         files_data = [get_file_info(f) for f in drive_files]
     except Exception as e:
-        files_data = []
         print(f"Erro ao carregar ficheiros: {e}")
 
     return render_template_string(DASHBOARD_TEMPLATE, files=files_data, user=session['user'])
@@ -283,9 +288,18 @@ def upload_file():
             
             try:
                 service = get_drive_service()
-                file_metadata = {'name': file.filename, 'parents': [FOLDER_ID]}
+                file_metadata = {
+                    'name': file.filename, 
+                    'parents': [FOLDER_ID]
+                }
                 media = MediaFileUpload(temp_path, resumable=True)
-                service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+                service.files().create(
+                    body=file_metadata, 
+                    media_body=media, 
+                    fields='id',
+                    supportsAllDrives=True
+                ).execute()
+                print(f"Ficheiro {file.filename} enviado com sucesso!")
             except Exception as e:
                 print(f"Erro no Upload: {e}")
             finally:
@@ -301,7 +315,7 @@ def download_file(file_id, filename):
     
     try:
         service = get_drive_service()
-        request_drive = service.files().get_media(fileId=file_id)
+        request_drive = service.files().get_media(fileId=file_id, supportsAllDrives=True)
         fh = io.BytesIO()
         downloader = MediaIoBaseDownload(fh, request_drive)
         done = False
