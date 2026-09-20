@@ -10,7 +10,7 @@ from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 app = Flask(__name__)
 app.secret_key = 'chave_secreta_super_segura'
 
-# ==================== CONFIGURAÇÕES DO GOOGLE DRIVE ====================
+# ==================== CONFIGURAÇÕES DO GOOGLE DRIVE (EM BASTIDORES) ====================
 FOLDER_ID = 'O_TEU_ID_DA_PASTA_DO_DRIVE'  # Substitui pelo ID que copiaste do URL do Google Drive
 CREDENTIALS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'credentials.json')
 
@@ -22,7 +22,6 @@ def get_drive_service():
     return build('drive', 'v3', credentials=creds)
 
 # ==================== GESTÃO DE UTILIZADORES ====================
-# Os utilizadores ficam num ficheiro temporário local
 USERS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'users.json')
 
 def load_users():
@@ -87,7 +86,7 @@ DASHBOARD_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Gestor de Ficheiros Google Drive</title>
+    <title>Gestor de Ficheiros Local</title>
     <script src="https://unpkg.com/lucide@latest"></script>
     <style>
         :root { --bg-color: #0f172a; --card-bg: #1e293b; --accent: #3b82f6; --accent-hover: #2563eb; --text-main: #f8fafc; --text-muted: #94a3b8; --border-color: #334155; --danger: #ef4444; }
@@ -122,8 +121,8 @@ DASHBOARD_TEMPLATE = """
     <aside>
         <div class="top-side">
             <div class="logo">
-                <i data-lucide="cloud"></i>
-                <span>DriveServer</span>
+                <i data-lucide="hard-drive"></i>
+                <span>LocalServer</span>
             </div>
             <ul class="nav-menu">
                 <li class="nav-item active" onclick="filterCategory('all')">
@@ -142,7 +141,7 @@ DASHBOARD_TEMPLATE = """
         </div>
         <a href="/logout" class="logout-btn">
             <i data-lucide="log-out"></i>
-            <span>Sair ({{ user }})</span>
+            <span>Terminar Sessão ({{ user }})</span>
         </a>
     </aside>
 
@@ -150,7 +149,7 @@ DASHBOARD_TEMPLATE = """
         <header>
             <div class="search-bar">
                 <i data-lucide="search" style="color: var(--text-muted);"></i>
-                <input type="text" id="searchInput" onkeyup="filterFiles()" placeholder="Pesquisar no Drive...">
+                <input type="text" id="searchInput" onkeyup="filterFiles()" placeholder="Pesquisar ficheiros...">
             </div>
             <form action="/upload" method="post" enctype="multipart/form-data" id="uploadForm">
                 <div class="upload-wrapper">
@@ -163,7 +162,7 @@ DASHBOARD_TEMPLATE = """
             </form>
         </header>
 
-        <h2 class="section-title">Ficheiros Guardados no Google Drive</h2>
+        <h2 class="section-title">Ficheiros Disponíveis</h2>
 
         <div class="files-grid" id="filesGrid">
             {% for file in files %}
@@ -205,7 +204,7 @@ DASHBOARD_TEMPLATE = """
 </html>
 """
 
-# ==================== FUNÇÕES AUXILIARES DRIVE ====================
+# ==================== FUNÇÕES AUXILIARES ====================
 def get_file_info(file_obj):
     filename = file_obj.get('name', 'Sem nome')
     ext = filename.split('.')[-1].lower() if '.' in filename else ''
@@ -261,14 +260,13 @@ def index():
     
     try:
         service = get_drive_service()
-        # Procura os ficheiros dentro da pasta específica do Drive
         query = f"'{FOLDER_ID}' in parents and trashed = false"
         results = service.files().list(q=query, fields="files(id, name, mimeType, size)").execute()
         drive_files = results.get('files', [])
         files_data = [get_file_info(f) for f in drive_files]
     except Exception as e:
         files_data = []
-        print(f"Erro ao carregar do Drive: {e}")
+        print(f"Erro ao carregar ficheiros: {e}")
 
     return render_template_string(DASHBOARD_TEMPLATE, files=files_data, user=session['user'])
 
@@ -280,7 +278,6 @@ def upload_file():
     if 'file' in request.files:
         file = request.files['file']
         if file.filename != '':
-            # Guarda temporariamente no servidor local antes do envio para o Drive
             temp_path = os.path.join('/tmp', file.filename) if os.path.exists('/tmp') else file.filename
             file.save(temp_path)
             
@@ -290,10 +287,10 @@ def upload_file():
                 media = MediaFileUpload(temp_path, resumable=True)
                 service.files().create(body=file_metadata, media_body=media, fields='id').execute()
             except Exception as e:
-                print(f"Erro no Upload para o Drive: {e}")
+                print(f"Erro no Upload: {e}")
             finally:
                 if os.path.exists(temp_path):
-                    os.remove(temp_path) # Apaga o ficheiro temporário local
+                    os.remove(temp_path)
 
     return redirect(url_for('index'))
 
